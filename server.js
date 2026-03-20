@@ -6,6 +6,20 @@ import { z } from 'zod'
 // --- Config ---
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_BASE = process.env.BEFORBUILD_API_URL || 'https://api.beforbuild.com'
+const SESSION_TTL_MS = 5 * 60 * 1000 // 5 minutes
+
+// --- Auth session store (sessionToken → { jwt, createdAt }) ---
+const authSessions = new Map()
+
+// Cleanup expired sessions every minute
+setInterval(() => {
+  const now = Date.now()
+  for (const [token, session] of authSessions) {
+    if (now - session.createdAt > SESSION_TTL_MS) {
+      authSessions.delete(token)
+    }
+  }
+}, 60_000)
 
 // --- API helper ---
 async function apiCall(path, body) {
@@ -20,7 +34,7 @@ async function apiCall(path, body) {
 function queryWithToken(jwt) {
   return async (operation, params = {}) => {
     if (!jwt) {
-      return { error: 'Pas de token. Passez jwt via l\'URL (/mcp?jwt=...) ou utilisez auth_login.' }
+      return { error: 'Non authentifie. Creez une session via POST /auth/session ou utilisez auth_login.' }
     }
     return apiCall('/v1/data', { operation, params, jwt })
   }
@@ -48,21 +62,20 @@ function createMcpServer(sessionJwt) {
 
   const server = new McpServer({
     name: 'BeForBuild',
-    version: '1.1.0',
+    version: '1.2.0',
     description: 'Accedez aux donnees de vos projets immobiliers BeForBuild : projets, foncier, bilan, contrats, planning, commercial et documents.',
   })
 
-  // auth_login
+  // auth_login — fallback for clients without session pre-auth
   server.tool(
     'auth_login',
-    'Authentification — obtenir un token d\'acces avec email et mot de passe. Inutile si le token est deja injecte via la session.',
+    'Authentification — obtenir un token d\'acces avec email et mot de passe. Inutile si la session est deja authentifiee.',
     { email: z.string().describe('Adresse email du compte BeForBuild'), password: z.string().describe('Mot de passe') },
     async ({ email, password }) => {
       const result = await apiCall('/auth/token', { email, password })
       if (result.error) {
         return { content: [{ type: 'text', text: `Echec : ${result.error}` }] }
       }
-      // Store JWT in session for subsequent calls
       if (result.access_token) {
         jwt = result.access_token
       }
@@ -70,7 +83,7 @@ function createMcpServer(sessionJwt) {
     }
   )
 
-  // list_records — jwt is optional (session-level by default)
+  // list_records
   server.tool(
     'list_records',
     'Lister les enregistrements d\'une table avec filtres, tri et pagination. Modules : public, foncier, bilan, contrats, planning, commercial, documents.',
@@ -83,10 +96,9 @@ function createMcpServer(sessionJwt) {
       order: z.string().optional().describe('Tri : colonne.asc ou colonne.desc'),
       limit: z.number().optional().describe('Nombre max de resultats (defaut: 20)'),
       offset: z.number().optional().describe('Offset pour pagination'),
-      jwt: z.string().optional().describe('Token (optionnel — injecte automatiquement via la session)'),
     },
-    async ({ module, table, projet_id, filters, select, order, limit, offset, jwt: toolJwt }) => {
-      const query = queryWithToken(getJwt(toolJwt))
+    async ({ module, table, projet_id, filters, select, order, limit, offset }) => {
+      const query = queryWithToken(getJwt())
       const params = {}
       if (projet_id) params.projet_id = projet_id
       if (filters) params.filters = filters
@@ -108,10 +120,9 @@ function createMcpServer(sessionJwt) {
       table: z.string().describe('Nom de la table'),
       id: z.string().describe('UUID de l\'enregistrement'),
       select: z.string().optional().describe('Colonnes a retourner'),
-      jwt: z.string().optional().describe('Token (optionnel — injecte automatiquement via la session)'),
     },
-    async ({ module, table, id, select, jwt: toolJwt }) => {
-      const query = queryWithToken(getJwt(toolJwt))
+    async ({ module, table, id, select }) => {
+      const query = queryWithToken(getJwt())
       const params = { id }
       if (select) params.select = select
       const result = await query(`${module}.${table}.get`, params)
@@ -127,10 +138,9 @@ function createMcpServer(sessionJwt) {
       module: z.string().describe('Module'),
       table: z.string().describe('Nom de la table'),
       data: z.record(z.any()).describe('Donnees a inserer : { colonne: valeur, ... }'),
-      jwt: z.string().optional().describe('Token (optionnel — injecte automatiquement via la session)'),
     },
-    async ({ module, table, data, jwt: toolJwt }) => {
-      const query = queryWithToken(getJwt(toolJwt))
+    async ({ module, table, data }) => {
+      const query = queryWithToken(getJwt())
       const result = await query(`${module}.${table}.create`, { data })
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
     }
@@ -145,10 +155,9 @@ function createMcpServer(sessionJwt) {
       table: z.string().describe('Nom de la table'),
       id: z.string().describe('UUID de l\'enregistrement a modifier'),
       data: z.record(z.any()).describe('Champs a modifier : { colonne: nouvelle_valeur, ... }'),
-      jwt: z.string().optional().describe('Token (optionnel — injecte automatiquement via la session)'),
     },
-    async ({ module, table, id, data, jwt: toolJwt }) => {
-      const query = queryWithToken(getJwt(toolJwt))
+    async ({ module, table, id, data }) => {
+      const query = queryWithToken(getJwt())
       const result = await query(`${module}.${table}.update`, { id, data })
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
     }
@@ -162,10 +171,9 @@ function createMcpServer(sessionJwt) {
       module: z.string().describe('Module'),
       table: z.string().describe('Nom de la table'),
       id: z.string().describe('UUID de l\'enregistrement a supprimer'),
-      jwt: z.string().optional().describe('Token (optionnel — injecte automatiquement via la session)'),
     },
-    async ({ module, table, id, jwt: toolJwt }) => {
-      const query = queryWithToken(getJwt(toolJwt))
+    async ({ module, table, id }) => {
+      const query = queryWithToken(getJwt())
       const result = await query(`${module}.${table}.delete`, { id })
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
     }
@@ -178,10 +186,9 @@ function createMcpServer(sessionJwt) {
     {
       function_name: z.string().describe('Nom de la fonction'),
       args: z.record(z.any()).optional().describe('Arguments de la fonction'),
-      jwt: z.string().optional().describe('Token (optionnel — injecte automatiquement via la session)'),
     },
-    async ({ function_name, args, jwt: toolJwt }) => {
-      const query = queryWithToken(getJwt(toolJwt))
+    async ({ function_name, args }) => {
+      const query = queryWithToken(getJwt())
       const result = await query(`public.${function_name}.rpc`, { function_name, args: args || {} })
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
     }
@@ -205,7 +212,7 @@ function createMcpServer(sessionJwt) {
   return server
 }
 
-// --- HTTP Server with Streamable HTTP transport ---
+// --- HTTP Server ---
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, DELETE',
@@ -213,8 +220,24 @@ const CORS_HEADERS = {
   'Access-Control-Expose-Headers': 'mcp-session-id',
 }
 
-// Store transports by session ID
+// Store MCP transports by session ID
 const sessions = new Map()
+
+// Read request body as JSON
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString()))
+      } catch {
+        resolve(null)
+      }
+    })
+    req.on('error', reject)
+  })
+}
 
 const httpServer = createServer(async (req, res) => {
   // CORS
@@ -227,32 +250,67 @@ const httpServer = createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://localhost:${PORT}`)
 
-  // Health check
+  // ---- Health check ----
   if (url.pathname === '/health' || (url.pathname === '/' && req.method === 'GET')) {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     return res.end(JSON.stringify({
       name: 'BeForBuild MCP Server',
-      version: '1.1.0',
+      version: '1.2.0',
       status: 'ok',
       transport: 'streamable-http',
       endpoint: '/mcp',
-      auth: 'Pass jwt via query param (/mcp?jwt=...) or Authorization header for session-level auth.',
+      auth: 'POST /auth/session with { jwt } in body → returns { session_token }. Then /mcp?session=<token>.',
     }))
   }
 
-  // MCP endpoint
+  // ---- POST /auth/session — exchange JWT for opaque session token ----
+  if (url.pathname === '/auth/session' && req.method === 'POST') {
+    const body = await readJsonBody(req)
+    const jwt = body?.jwt
+
+    if (!jwt) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: 'Missing jwt in request body' }))
+    }
+
+    // Generate opaque session token (not the JWT itself)
+    const sessionToken = crypto.randomUUID()
+    authSessions.set(sessionToken, { jwt, createdAt: Date.now() })
+
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({
+      session_token: sessionToken,
+      expires_in: SESSION_TTL_MS / 1000,
+    }))
+  }
+
+  // ---- MCP endpoint ----
   if (url.pathname === '/mcp') {
-    const sessionId = req.headers['mcp-session-id']
+    const mcpSessionId = req.headers['mcp-session-id']
 
     if (req.method === 'POST') {
-      let transport = sessions.get(sessionId)
+      let transport = sessions.get(mcpSessionId)
 
       if (!transport) {
-        // Extract JWT from query param or Authorization header (session-level injection)
-        const jwtFromQuery = url.searchParams.get('jwt')
-        const authHeader = req.headers['authorization']
-        const jwtFromHeader = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
-        const sessionJwt = jwtFromQuery || jwtFromHeader || null
+        // Resolve JWT from session token (secure) or Authorization header (fallback)
+        let resolvedJwt = null
+
+        // 1. Session token via query param (opaque, non-sensitive)
+        const sessionToken = url.searchParams.get('session')
+        if (sessionToken) {
+          const session = authSessions.get(sessionToken)
+          if (session && (Date.now() - session.createdAt < SESSION_TTL_MS)) {
+            resolvedJwt = session.jwt
+          }
+        }
+
+        // 2. Fallback: Authorization header (for direct API clients)
+        if (!resolvedJwt) {
+          const authHeader = req.headers['authorization']
+          if (authHeader?.startsWith('Bearer ')) {
+            resolvedJwt = authHeader.slice(7)
+          }
+        }
 
         // Create transport
         transport = new StreamableHTTPServerTransport({
@@ -266,8 +324,8 @@ const httpServer = createServer(async (req, res) => {
           if (transport.sessionId) sessions.delete(transport.sessionId)
         }
 
-        // Create MCP server with JWT injected via closure
-        const mcpServer = createMcpServer(sessionJwt)
+        // Create MCP server with JWT injected via closure — JWT never leaves the server
+        const mcpServer = createMcpServer(resolvedJwt)
         await mcpServer.connect(transport)
       }
 
@@ -276,7 +334,7 @@ const httpServer = createServer(async (req, res) => {
     }
 
     if (req.method === 'GET') {
-      const transport = sessions.get(sessionId)
+      const transport = sessions.get(mcpSessionId)
       if (!transport) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
         return res.end(JSON.stringify({ error: 'No session. Send a POST to /mcp first.' }))
@@ -286,10 +344,10 @@ const httpServer = createServer(async (req, res) => {
     }
 
     if (req.method === 'DELETE') {
-      const transport = sessions.get(sessionId)
+      const transport = sessions.get(mcpSessionId)
       if (transport) {
         await transport.close()
-        sessions.delete(sessionId)
+        sessions.delete(mcpSessionId)
       }
       res.writeHead(204)
       return res.end()
@@ -301,8 +359,8 @@ const httpServer = createServer(async (req, res) => {
 })
 
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`BeForBuild MCP Server v1.1.0 running on port ${PORT}`)
-  console.log(`  Health: http://localhost:${PORT}/health`)
-  console.log(`  MCP:    http://localhost:${PORT}/mcp`)
-  console.log(`  Auth:   /mcp?jwt=<token> or Authorization: Bearer <token>`)
+  console.log(`BeForBuild MCP Server v1.2.0 running on port ${PORT}`)
+  console.log(`  Health:  http://localhost:${PORT}/health`)
+  console.log(`  Auth:    POST http://localhost:${PORT}/auth/session { jwt }`)
+  console.log(`  MCP:     http://localhost:${PORT}/mcp?session=<token>`)
 })
