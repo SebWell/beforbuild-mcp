@@ -6,6 +6,8 @@ import { z } from 'zod'
 // --- Config ---
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_BASE = process.env.BEFORBUILD_API_URL || 'https://api.beforbuild.com'
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://eghkvgxzaxznbxrnkgfo.supabase.co'
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || ''
 const SESSION_TTL_MS = 5 * 60 * 1000 // 5 minutes
 
 // --- Auth session store (sessionToken → { jwt, createdAt }) ---
@@ -317,6 +319,73 @@ const httpServer = createServer(async (req, res) => {
     const result = await apiCall('/v1/data', { operation: body.operation, params: body.params || {}, jwt })
     res.writeHead(200, { 'Content-Type': 'application/json' })
     return res.end(JSON.stringify(result))
+  }
+
+  // ---- POST /v1/storage — Storage proxy with session_token ----
+  if (url.pathname === '/v1/storage' && req.method === 'POST') {
+    const body = await readJsonBody(req)
+    if (!body?.path || !body?.action) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: "Missing 'path' and 'action' (upload|sign|delete)" }))
+    }
+
+    // Resolve JWT from session_token
+    let jwt = body.jwt || null
+    if (!jwt && body.session_token) {
+      const session = authSessions.get(body.session_token)
+      if (session && (Date.now() - session.createdAt < SESSION_TTL_MS)) {
+        jwt = session.jwt
+      } else {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ error: 'Invalid or expired session_token' }))
+      }
+    }
+    if (!jwt) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: "Missing 'jwt' or 'session_token'" }))
+    }
+
+    const headers = {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${jwt}`,
+    }
+
+    try {
+      let storageUrl, method, fetchBody, fetchHeaders
+
+      if (body.action === 'sign') {
+        // Sign URL: POST /storage/v1/object/sign/{path}
+        storageUrl = `${SUPABASE_URL}/storage/v1/object/sign/${body.path}`
+        method = 'POST'
+        fetchBody = JSON.stringify({ expiresIn: body.expiresIn || 3600 })
+        fetchHeaders = { ...headers, 'Content-Type': 'application/json' }
+      } else if (body.action === 'upload') {
+        // Upload: POST /storage/v1/object/{bucket}/{path}
+        // For binary uploads, the body.data should be base64-encoded
+        storageUrl = `${SUPABASE_URL}/storage/v1/object/${body.path}`
+        method = 'POST'
+        fetchBody = body.data ? Buffer.from(body.data, 'base64') : ''
+        fetchHeaders = { ...headers, 'Content-Type': body.contentType || 'application/octet-stream' }
+      } else if (body.action === 'delete') {
+        storageUrl = `${SUPABASE_URL}/storage/v1/object/${body.path}`
+        method = 'DELETE'
+        fetchHeaders = headers
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ error: `Unknown action: ${body.action}` }))
+      }
+
+      const storageResp = await fetch(storageUrl, { method, headers: fetchHeaders, body: fetchBody })
+      const text = await storageResp.text()
+      let result
+      try { result = JSON.parse(text) } catch { result = text }
+
+      res.writeHead(storageResp.ok ? 200 : storageResp.status, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ success: storageResp.ok, data: result }))
+    } catch (e) {
+      res.writeHead(502, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: `Storage error: ${e.message}` }))
+    }
   }
 
   // ---- MCP endpoint ----
