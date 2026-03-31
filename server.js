@@ -28,7 +28,12 @@ async function apiCall(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return res.json()
+  const text = await res.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { error: `API returned non-JSON (HTTP ${res.status}): ${text.substring(0, 200)}` }
+  }
 }
 
 function queryWithToken(jwt) {
