@@ -22,7 +22,26 @@ setInterval(() => {
 }, 60_000)
 
 // --- API helper ---
+// Supabase direct config (bypass api-proxy for /v1/data calls from same VPS)
+const SUPABASE_URL = process.env.SUPABASE_URL || ''
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || ''
+
 async function apiCall(path, body) {
+  // For /v1/data calls: go directly to Supabase EF api-supabase (skip api-proxy DNS loop)
+  if (path === '/v1/data' && SUPABASE_URL && SUPABASE_ANON_KEY && body.jwt) {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/api-supabase`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${body.jwt}`,
+        'apikey': SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({ operation: body.operation, params: body.params || {}, jwt: body.jwt }),
+    })
+    return res.json()
+  }
+
+  // Fallback: go through api-proxy
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
