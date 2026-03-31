@@ -284,6 +284,36 @@ const httpServer = createServer(async (req, res) => {
     }))
   }
 
+  // ---- POST /v1/data — REST proxy with session_token (for CF Worker ai-orchestrator) ----
+  if (url.pathname === '/v1/data' && req.method === 'POST') {
+    const body = await readJsonBody(req)
+    if (!body?.operation) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: "Missing 'operation'" }))
+    }
+
+    // Resolve JWT from session_token
+    let jwt = body.jwt || null
+    if (!jwt && body.session_token) {
+      const session = authSessions.get(body.session_token)
+      if (session && (Date.now() - session.createdAt < SESSION_TTL_MS)) {
+        jwt = session.jwt
+      } else {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ error: 'Invalid or expired session_token' }))
+      }
+    }
+    if (!jwt) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: "Missing 'jwt' or 'session_token'" }))
+    }
+
+    // Forward to api-proxy with resolved JWT
+    const result = await apiCall('/v1/data', { operation: body.operation, params: body.params || {}, jwt })
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify(result))
+  }
+
   // ---- MCP endpoint ----
   if (url.pathname === '/mcp') {
     const mcpSessionId = req.headers['mcp-session-id']
