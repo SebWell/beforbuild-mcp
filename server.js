@@ -380,8 +380,8 @@ const httpServer = createServer(async (req, res) => {
       let result
       try { result = JSON.parse(text) } catch { result = text }
 
-      res.writeHead(storageResp.ok ? 200 : storageResp.status, { 'Content-Type': 'application/json' })
-      return res.end(JSON.stringify({ success: storageResp.ok, data: result }))
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ success: storageResp.ok, data: result, status: storageResp.status }))
     } catch (e) {
       res.writeHead(502, { 'Content-Type': 'application/json' })
       return res.end(JSON.stringify({ error: `Storage error: ${e.message}` }))
