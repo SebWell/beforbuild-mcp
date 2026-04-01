@@ -321,7 +321,56 @@ const httpServer = createServer(async (req, res) => {
     return res.end(JSON.stringify(result))
   }
 
-  // ---- POST /v1/storage — Storage proxy with session_token ----
+  // ---- PUT /v1/storage/upload — Binary upload proxy with session_token ----
+  // Accepts raw binary body (not base64 JSON) for reliable file uploads
+  if (url.pathname === '/v1/storage/upload' && req.method === 'PUT') {
+    const storagePath = url.searchParams.get('path')
+    const sessionToken = url.searchParams.get('session_token')
+    const contentType = req.headers['content-type'] || 'application/octet-stream'
+
+    if (!storagePath || !sessionToken) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: "Missing 'path' or 'session_token' query params" }))
+    }
+
+    // Resolve JWT from session_token
+    const session = authSessions.get(sessionToken)
+    if (!session || (Date.now() - session.createdAt > SESSION_TTL_MS)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: 'Invalid or expired session_token' }))
+    }
+    const jwt = session.jwt
+
+    // Stream the raw body to Supabase Storage
+    try {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const body = Buffer.concat(chunks)
+
+      const storageResp = await fetch(`${SUPABASE_URL}/storage/v1/object/${storagePath}`, {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${jwt}`,
+          'Content-Type': contentType,
+          'x-upsert': 'true',
+        },
+        body,
+      })
+
+      const text = await storageResp.text()
+      let result
+      try { result = JSON.parse(text) } catch { result = text }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ success: storageResp.ok, data: result, status: storageResp.status }))
+    } catch (e) {
+      res.writeHead(502, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ error: `Upload error: ${e.message}` }))
+    }
+  }
+
+  // ---- POST /v1/storage — Storage proxy with session_token (JSON actions: sign, delete) ----
   if (url.pathname === '/v1/storage' && req.method === 'POST') {
     const body = await readJsonBody(req)
     if (!body?.path || !body?.action) {
