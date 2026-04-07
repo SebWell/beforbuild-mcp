@@ -8,7 +8,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_BASE = process.env.BEFORBUILD_API_URL || 'https://api.beforbuild.com'
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://eghkvgxzaxznbxrnkgfo.supabase.co'
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || ''
-const SESSION_TTL_MS = 5 * 60 * 1000 // 5 minutes
+const SESSION_TTL_MS = 15 * 60 * 1000 // 15 minutes
 
 // --- Auth session store (sessionToken → { jwt, createdAt }) ---
 const authSessions = new Map()
