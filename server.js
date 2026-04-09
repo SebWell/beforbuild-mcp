@@ -23,7 +23,7 @@ setInterval(() => {
   }
 }, 60_000)
 
-// --- API helper ---
+// --- API helper (legacy, kept for fallback) ---
 async function apiCall(path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
@@ -38,12 +38,114 @@ async function apiCall(path, body) {
   }
 }
 
+// --- Direct PostgREST call (bypasses CF Worker, ~200-500ms faster) ---
+async function directPostgREST(operation, params = {}, jwt) {
+  const parts = operation.split('.')
+  if (parts.length < 3) return { success: false, error: `Bad format: ${operation}` }
+
+  const [schema, table, action] = parts
+  const p = params || {}
+
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${jwt}`,
+  }
+
+  if (schema !== 'public') {
+    headers['Accept-Profile'] = schema
+    headers['Content-Profile'] = schema
+  }
+
+  let url = `${SUPABASE_URL}/rest/v1/${table}`
+  let method = 'GET'
+  let fetchBody = undefined
+
+  switch (action) {
+    case 'list': {
+      const qp = []
+      const filters = p.filters || {}
+      for (const [col, val] of Object.entries(filters)) {
+        const sv = String(val)
+        if (/^(eq|neq|gt|gte|lt|lte|like|ilike|is|in|cs|cd)\./.test(sv)) {
+          qp.push(`${col}=${sv}`)
+        } else {
+          qp.push(`${col}=eq.${sv}`)
+        }
+      }
+      if (p.projet_id) qp.push(`projet_id=eq.${p.projet_id}`)
+      if (p.user_id) qp.push(`user_id=eq.${p.user_id}`)
+      qp.push(`select=${p.select || '*'}`)
+      qp.push(`order=${p.order || 'created_at.desc'}`)
+      if (p.limit) qp.push(`limit=${p.limit}`)
+      if (p.offset) qp.push(`offset=${p.offset}`)
+      url += '?' + qp.join('&')
+      break
+    }
+    case 'read':
+    case 'get': {
+      if (!p.id) return { success: false, error: 'get requires params.id' }
+      url += `?id=eq.${p.id}&select=${p.select || '*'}`
+      headers['Accept'] = 'application/vnd.pgrst.object+json'
+      break
+    }
+    case 'create': {
+      if (!p.data) return { success: false, error: 'create requires params.data' }
+      method = 'POST'
+      fetchBody = JSON.stringify(p.data)
+      headers['Prefer'] = 'return=representation'
+      break
+    }
+    case 'update': {
+      if (!p.id) return { success: false, error: 'update requires params.id' }
+      if (!p.data) return { success: false, error: 'update requires params.data' }
+      method = 'PATCH'
+      url += `?id=eq.${p.id}`
+      fetchBody = JSON.stringify(p.data)
+      headers['Prefer'] = 'return=representation'
+      break
+    }
+    case 'delete': {
+      if (!p.id) return { success: false, error: 'delete requires params.id' }
+      method = 'DELETE'
+      url += `?id=eq.${p.id}`
+      headers['Prefer'] = 'return=representation'
+      break
+    }
+    case 'rpc': {
+      const fnName = p.function_name || table
+      url = `${SUPABASE_URL}/rest/v1/rpc/${fnName}`
+      method = 'POST'
+      fetchBody = JSON.stringify(p.args || {})
+      delete headers['Accept-Profile']
+      delete headers['Content-Profile']
+      break
+    }
+    default:
+      return { success: false, error: `Unknown action: ${action}` }
+  }
+
+  try {
+    const response = await fetch(url, { method, headers, body: fetchBody })
+    const text = await response.text()
+    let data
+    try { data = JSON.parse(text) } catch { data = text }
+
+    if (!response.ok) {
+      return { success: false, error: `HTTP ${response.status}`, details: data, operation }
+    }
+    return { success: true, data, operation }
+  } catch (err) {
+    return { success: false, error: err.message, operation }
+  }
+}
+
 function queryWithToken(jwt) {
   return async (operation, params = {}) => {
     if (!jwt) {
       return { error: 'Non authentifie. Creez une session via POST /auth/session ou utilisez auth_login.' }
     }
-    return apiCall('/v1/data', { operation, params, jwt })
+    return directPostgREST(operation, params, jwt)
   }
 }
 
@@ -316,7 +418,7 @@ const httpServer = createServer(async (req, res) => {
     }
 
     // Forward to api-proxy with resolved JWT
-    const result = await apiCall('/v1/data', { operation: body.operation, params: body.params || {}, jwt })
+    const result = await directPostgREST(body.operation, body.params || {}, jwt)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     return res.end(JSON.stringify(result))
   }
