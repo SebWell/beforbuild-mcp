@@ -7,7 +7,7 @@ import { z } from 'zod'
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_BASE = process.env.BEFORBUILD_API_URL || 'https://api.beforbuild.com'
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://eghkvgxzaxznbxrnkgfo.supabase.co'
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || ''
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVnaGt2Z3h6YXh6bmJ4cm5rZ2ZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwMjA4NTYsImV4cCI6MjA4NTU5Njg1Nn0.rAk13bQcoOodw1sqXMM0v9PzZZu8iLrVHQnHHSFLbFg'
 const SESSION_TTL_MS = 15 * 60 * 1000 // 15 minutes
 
 // --- Auth session store (sessionToken → { jwt, createdAt }) ---
